@@ -1,6 +1,6 @@
 ﻿# AutoMate AI
 
-** Your Academic Life, Intelligently Automated **
+**Your Academic Life, Intelligently Automated**
 
 AutoMate AI brings assignments, deadlines, study documents, and planning into one student workspace. It combines a live dashboard with document analysis, academic search, Google Classroom sync, and an AI assistant that helps turn a busy workload into clear next steps.
 
