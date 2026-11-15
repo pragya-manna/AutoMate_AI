@@ -110,7 +110,10 @@ src/
   components/
     pages/             Overview, Documents, Agent, Assignments, Memory, Settings
 ```
-
+## Future Integrations
+- Microsoft Teams: Sync class announcements, meeting schedules, assignments, and important academic updates.
+- Google Drive: Import, organize, and analyze study materials directly from Drive.
+- Future Expansion: Support Microsoft Outlook, Moodle, Canvas LMS, Notion, and other academic platforms.
 
 ## Security
 
