@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   MemoryStick,
   Search,
@@ -9,6 +9,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import type { DashboardData, MemoryEntry } from '@/types';
+import { fetchMemory, queryMemory } from '@/api';
 
 type Props = {
   data: DashboardData;
@@ -18,26 +19,49 @@ export default function Memory({ data }: Props) {
   const [entries, setEntries] = useState<MemoryEntry[]>(data.memory);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
 
-  const handleQuery = () => {
-    if (!query.trim() || loading) return;
+    fetchMemory()
+      .then((savedEntries) => {
+        if (!cancelled) {
+          setEntries(savedEntries);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(
+            err instanceof Error ? err.message : 'Could not load saved Memory history.'
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleQuery = async () => {
+    const question = query.trim();
+    if (!question || loading) return;
+
     setLoading(true);
+    setError(null);
 
-    setTimeout(() => {
-      const newEntry: MemoryEntry = {
-        id: `mem-${Date.now()}`,
-        query: query.trim(),
-        answer: `Based on your uploaded documents and previous conversations, here's what I found regarding "${query.trim()}": Your academic records indicate this topic is related to your current coursework. The system retrieved relevant information from your documents and cross-referenced it with your assignment deadlines and lecture notes. This answer was generated using pgvector semantic search across your academic memory store.`,
-        sources: data.documents.slice(0, 2).map((d) => ({
-          docName: d.name,
-          snippet: d.summary?.slice(0, 120) + '...' || 'Document analyzed by Gemini',
-        })),
-        timestamp: new Date().toISOString(),
-      };
-      setEntries((prev) => [newEntry, ...prev]);
+    try {
+      const entry = await queryMemory(question);
+      setEntries((prev) => [entry, ...prev]);
       setQuery('');
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Memory search failed. Check the backend and Gemini API key.'
+      );
+    } finally {
       setLoading(false);
-    }, 2000);
+    }
   };
 
   return (
@@ -79,6 +103,11 @@ export default function Memory({ data }: Props) {
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             {loading ? 'Searching...' : 'Ask'}
           </button>
+          {error && (
+            <p className="text-sm text-coral-600" role="alert">
+              {error}
+            </p>
+          )}
         </div>
       </div>
 

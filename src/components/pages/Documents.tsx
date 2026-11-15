@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import type { DashboardData, UploadedDocument, DocumentType } from '@/types';
 import { StatusBadge } from '../DashboardLayout';
+import { deleteDocument, uploadDocument } from '@/api';
 
 type Props = {
   data: DashboardData;
@@ -53,45 +54,58 @@ export default function Documents({ data }: Props) {
   const [dragActive, setDragActive] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const handleFiles = (files: FileList | null) => {
+  const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+
     setUploading(true);
 
-    // Simulate upload + processing
-    const newDocs: UploadedDocument[] = Array.from(files).map((file, i) => ({
-      id: `upload-${Date.now()}-${i}`,
-      name: file.name,
-      type: file.type.includes('image') ? 'image' : file.type.includes('pdf') ? 'pdf' : 'notes',
-      status: 'processing',
-      uploadedAt: new Date().toISOString(),
-      size: file.size,
-      subject: 'Uncategorized',
-    }));
+    try {
+      const uploadedDocs = await Promise.all(
+        Array.from(files).map(async (file) => {
+          const doc = await uploadDocument(file);
 
-    setDocs((prev) => [...newDocs, ...prev]);
+          // The backend may return a "failed" document instead of an HTTP error.
+          if (doc.status === 'failed') {
+            throw new Error(`The backend could not analyze "${file.name}".`);
+          }
 
-    // Simulate Gemini analysis completing
-    setTimeout(() => {
-      setDocs((prev) =>
-        prev.map((d) =>
-          newDocs.some((nd) => nd.id === d.id)
-            ? {
-                ...d,
-                status: 'analyzed',
-                summary: 'Gemini analyzed this document and extracted key academic information including deadlines and topics.',
-                extractedDates: [new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0]],
-                extractedTasks: ['Review key concepts', 'Prepare summary notes'],
-              }
-            : d
-        )
+          return doc;
+        })
       );
+
+      setDocs((prev) => [...uploadedDocs, ...prev]);
+    } catch (error) {
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : 'Upload failed. Check that the backend and Gemini API key are working.'
+      );
+    } finally {
       setUploading(false);
-    }, 2500);
+
+      // Let the user select the same file again after a failed upload.
+      if (fileInput.current) {
+        fileInput.current.value = '';
+      }
+    }
   };
 
-  const handleDelete = (id: string) => {
-    setDocs((prev) => prev.filter((d) => d.id !== id));
-    if (selected?.id === id) setSelected(null);
+  const handleDelete = async (id: string) => {
+    try {
+      await deleteDocument(id);
+
+      setDocs((prev) => prev.filter((doc) => doc.id !== id));
+
+      if (selected?.id === id) {
+        setSelected(null);
+      }
+    } catch (error) {
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : 'Could not delete the document. Check the backend connection.'
+      );
+    }
   };
 
   return (
@@ -101,17 +115,16 @@ export default function Documents({ data }: Props) {
         onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
         onDragLeave={() => setDragActive(false)}
         onDrop={(e) => { e.preventDefault(); setDragActive(false); handleFiles(e.dataTransfer.files); }}
-        className={`relative rounded-2xl border-2 border-dashed p-8 text-center transition-all duration-300 ${
-          dragActive
+        className={`relative rounded-2xl border-2 border-dashed p-8 text-center transition-all duration-300 ${dragActive
             ? 'border-brand-400 bg-brand-50'
             : 'border-ink-300 bg-white hover:border-brand-300 hover:bg-brand-50/30'
-        }`}
+          }`}
       >
         <input
           ref={fileInput}
           type="file"
           multiple
-          accept=".pdf,.png,.jpg,.jpeg,.docx,.txt"
+          accept=".pdf,.png,.jpg,.jpeg,.txt"
           className="hidden"
           onChange={(e) => handleFiles(e.target.files)}
         />
@@ -154,9 +167,8 @@ export default function Documents({ data }: Props) {
               return (
                 <div
                   key={doc.id}
-                  className={`card cursor-pointer p-4 transition-all duration-200 hover:shadow-md ${
-                    selected?.id === doc.id ? 'ring-2 ring-brand-400' : ''
-                  }`}
+                  className={`card cursor-pointer p-4 transition-all duration-200 hover:shadow-md ${selected?.id === doc.id ? 'ring-2 ring-brand-400' : ''
+                    }`}
                   onClick={() => setSelected(doc)}
                 >
                   <div className="flex items-start gap-3">

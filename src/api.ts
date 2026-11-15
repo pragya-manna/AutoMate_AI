@@ -213,6 +213,13 @@ export async function updateAssignment(
     body: JSON.stringify(patch),
   });
 }
+export async function markAssignmentComplete(
+  id: string
+): Promise<{ id: string; status: string; progress: number }> {
+  return apiFetch(`/api/assignments/${id}/complete`, {
+    method: 'POST',
+  });
+}
 
 // ---- Memory ----
 

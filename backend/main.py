@@ -37,6 +37,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.coursework.me.readonly",
+    "https://www.googleapis.com/auth/classroom.coursework.me",
     "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
     "https://www.googleapis.com/auth/drive.file",
 ]
@@ -575,7 +576,7 @@ async def memory_query(
 
         rows = []
         try:
-            qvec = gemini_embed(client, req.query)
+            qvec = await asyncio.to_thread(gemini_embed, client, req.query)
             rows = await _fetch(
                 """
                 SELECT d.name AS name, e.content_chunk AS chunk
@@ -604,7 +605,7 @@ async def memory_query(
                 "If the answer is not in them, say you could not find it.\n\n"
                 f"Documents:\n{context}\n\nQuestion: {req.query}"
             )
-            answer = _gen(client, prompt, as_json=False)
+            answer = await asyncio.to_thread(_gen, client, prompt, False)
             sources = [{"docName": r["name"], "snippet": (r["chunk"] or "")[:200]} for r in rows]
 
         saved = await _fetch(
@@ -803,50 +804,232 @@ async def calendar_push_all():
 
 def _classroom_fetch_sync(creds):
     from googleapiclient.discovery import build
+
     service = build("classroom", "v1", credentials=creds, cache_discovery=False)
     items = []
+
     courses = service.courses().list(courseStates=["ACTIVE"]).execute().get("courses", [])
-    for c in courses:
-        try:
-            work = service.courses().courseWork().list(courseId=c["id"]).execute().get("courseWork", [])
-        except Exception as e:
-            print(f"Classroom: skipped course '{c.get('name')}': {e}")
-            continue
-        for w in work:
-            dd = w.get("dueDate")
-            due = date(dd["year"], dd["month"], dd["day"]) if dd else None
-            items.append({"external_id": f"gc-{w['id']}", "title": w.get("title", "Untitled"),
-                          "subject": c.get("name"), "due": due})
+
+    for course in courses:
+        course_id = course["id"]
+        course_name = course.get("name", "Classroom")
+
+        page_token = None
+        while True:
+            response = service.courses().courseWork().list(
+                courseId=course_id,
+                pageToken=page_token,
+            ).execute()
+
+            for work in response.get("courseWork", []):
+                work_id = work["id"]
+                due_info = work.get("dueDate")
+                due_date = (
+                    date(
+                        due_info["year"],
+                        due_info["month"],
+                        due_info["day"],
+                    )
+                    if due_info
+                    else None
+                )
+
+                # See whether the signed-in student's work has been turned in.
+                submission_state = None
+                assigned_grade = None
+                try:
+                    submissions = service.courses().courseWork().studentSubmissions().list(
+                        courseId=course_id,
+                        courseWorkId=work_id,
+                        userId="me",
+                    ).execute().get("studentSubmissions", [])
+
+                    if submissions:
+                        submission_state = submissions[0].get("state")
+                        assigned_grade = submissions[0].get("assignedGrade")
+                except Exception as exc:
+                    print(f"Could not read submission for {work_id}: {exc}")
+
+                if assigned_grade is not None:
+                    local_status = "graded"
+                elif submission_state == "TURNED_IN":
+                    local_status = "submitted"
+                else:
+                    local_status = None
+
+                items.append({
+                    # Include course ID to avoid collisions between courses.
+                    "external_id": f"gc:{course_id}:{work_id}",
+                    "legacy_external_id": f"gc-{work_id}",
+                    "title": work.get("title", "Untitled"),
+                    "subject": course_name,
+                    "due": due_date,
+                    "status": local_status,
+                })
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
     return items
 
 
 @app.post("/api/classroom/sync")
 async def classroom_sync():
-    """Pulls Google Classroom assignments into the assignments table."""
+    """Import new Classroom work and refresh existing work and submission status."""
     creds = await _google_credentials()
     if not creds:
-        raise HTTPException(status_code=400, detail=f"Google not connected. Open {BACKEND_URL}/auth/google/login")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Google not connected. Open {BACKEND_URL}/auth/google/login",
+        )
+
     try:
         items = await asyncio.to_thread(_classroom_fetch_sync, creds)
-    except Exception as e:
-        print(f"CLASSROOM SYNC FAILED: {e}")
-        raise HTTPException(status_code=500, detail=f"Classroom sync failed: {e}")
+    except Exception as exc:
+        print(f"CLASSROOM SYNC FAILED: {exc}")
+        raise HTTPException(status_code=500, detail=f"Classroom sync failed: {exc}")
+
     added = 0
-    try:
-        for it in items:
-            if await _fetch("SELECT 1 FROM assignments WHERE external_id = $1", it["external_id"]):
-                continue
+    updated = 0
+
+    for item in items:
+        # Also find old IDs from the previous gc-{work_id} format.
+        existing = await _fetch(
+            """
+            SELECT id::text AS id
+            FROM assignments
+            WHERE external_id = $1 OR external_id = $2
+            LIMIT 1
+            """,
+            item["external_id"],
+            item["legacy_external_id"],
+        )
+
+        if existing:
+            # Only replace local progress/status when Classroom says it was
+            # turned in or graded. Otherwise retain locally tracked progress.
             await _execute(
-                "INSERT INTO assignments (title, subject, due_date, status, priority, progress, source, external_id) "
-                "VALUES ($1, $2, $3, 'not_started', 'medium', 0, 'google_classroom', $4)",
-                it["title"], it["subject"], it["due"], it["external_id"],
+                """
+                UPDATE assignments
+                SET external_id = $2,
+                    title = $3,
+                    subject = $4,
+                    due_date = $5,
+                    status = CASE
+                        WHEN $6::text IS NOT NULL THEN $6
+                        ELSE status
+                    END,
+                    progress = CASE
+                        WHEN $6 = 'submitted' THEN 100
+                        ELSE progress
+                    END
+                WHERE id = $1::uuid
+                """,
+                existing[0]["id"],
+                item["external_id"],
+                item["title"],
+                item["subject"],
+                item["due"],
+                item["status"],
+            )
+            updated += 1
+        else:
+            await _execute(
+                """
+                INSERT INTO assignments
+                    (title, subject, due_date, status, priority, progress, source, external_id)
+                VALUES
+                    ($1, $2, $3, COALESCE($4, 'not_started'), 'medium',
+                     CASE WHEN $4 = 'submitted' THEN 100 ELSE 0 END,
+                     'google_classroom', $5)
+                """,
+                item["title"],
+                item["subject"],
+                item["due"],
+                item["status"],
+                item["external_id"],
             )
             added += 1
-    except Exception as e:
-        print(f"CLASSROOM SAVE FAILED: {e}")
-        raise HTTPException(status_code=500, detail=f"Saving to database failed: {e}")
-    return {"synced": added, "total": len(items)}
 
+    return {"added": added, "updated": updated, "total": len(items)}
+
+async def _classroom_turn_in_sync(creds, course_id: str, work_id: str):
+        from googleapiclient.discovery import build
+
+        service = build("classroom", "v1", credentials=creds, cache_discovery=False)
+
+        submissions = service.courses().courseWork().studentSubmissions().list(
+            courseId=course_id,
+            courseWorkId=work_id,
+            userId="me",
+        ).execute().get("studentSubmissions", [])
+
+        if not submissions:
+            raise ValueError("No student submission was found for this Classroom assignment.")
+
+        submission = submissions[0]
+        if submission.get("state") not in ("TURNED_IN", "RETURNED"):
+            service.courses().courseWork().studentSubmissions().turnIn(
+                courseId=course_id,
+                courseWorkId=work_id,
+                id=submission["id"],
+                body={},
+            ).execute()
+
+
+@app.post("/api/assignments/{assignment_id}/complete")
+async def complete_assignment(assignment_id: str):
+    rows = await _fetch(
+        """
+        SELECT id::text AS id, source, external_id
+        FROM assignments
+        WHERE id = $1::uuid
+        """,
+        assignment_id,
+    )
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+
+    assignment = rows[0]
+
+    if assignment["source"] == "google_classroom":
+        external_id = assignment["external_id"] or ""
+
+        # This route needs the new gc:{course_id}:{work_id} format.
+        parts = external_id.split(":")
+        if len(parts) != 3 or parts[0] != "gc":
+            raise HTTPException(
+                status_code=409,
+                detail="Sync Classroom assignments again before marking this one done.",
+            )
+
+        creds = await _google_credentials()
+        if not creds:
+            raise HTTPException(status_code=400, detail="Reconnect Google Classroom first.")
+
+        try:
+            await asyncio.to_thread(
+                _classroom_turn_in_sync,
+                creds,
+                parts[1],
+                parts[2],
+            )
+        except Exception as exc:
+            print(f"CLASSROOM TURN-IN FAILED: {exc}")
+            raise HTTPException(status_code=502, detail=f"Classroom turn-in failed: {exc}")
+
+    await _execute(
+        """
+        UPDATE assignments
+        SET status = 'submitted', progress = 100
+        WHERE id = $1::uuid
+        """,
+        assignment_id,
+    )
+
+    return {"id": assignment_id, "status": "submitted", "progress": 100}
 
 # ═══════════════════════════════════════════════════════════════════════
 # DATA QUERIES (shape matches src/types.ts)
@@ -992,3 +1175,34 @@ async def _get_student_context():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+_classroom_sync_task = None
+
+
+async def _classroom_sync_loop():
+    while True:
+        try:
+            await classroom_sync()
+        except Exception as exc:
+            # This is expected before Google Classroom has been connected.
+            print(f"AUTOMATIC CLASSROOM SYNC: {exc}")
+
+        await asyncio.sleep(120)
+
+
+@app.on_event("startup")
+async def start_classroom_sync_loop():
+    global _classroom_sync_task
+    _classroom_sync_task = asyncio.create_task(_classroom_sync_loop())
+
+
+@app.on_event("shutdown")
+async def stop_classroom_sync_loop():
+    global _classroom_sync_task
+    if _classroom_sync_task:
+        _classroom_sync_task.cancel()
+        try:
+            await _classroom_sync_task
+        except asyncio.CancelledError:
+            pass

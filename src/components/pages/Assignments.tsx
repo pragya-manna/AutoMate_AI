@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ClipboardList,
   CheckCircle2,
@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import type { DashboardData, Assignment } from '@/types';
 import { PriorityBadge, StatusBadge } from '../DashboardLayout';
+import { fetchAssignments, markAssignmentComplete } from '@/api';
 
 type Props = {
   data: DashboardData;
@@ -21,6 +22,49 @@ export default function Assignments({ data }: Props) {
   const [assignments, setAssignments] = useState<Assignment[]>(data.assignments);
   const [expanded, setExpanded] = useState<string | null>(assignments[0]?.id || null);
   const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('all');
+  const [completing, setCompleting] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    const refresh = async () => {
+      try {
+        const latest = await fetchAssignments();
+        if (active) setAssignments(latest);
+      } catch (error) {
+        console.error('Could not refresh assignments:', error);
+      }
+    };
+
+    void refresh();
+    const timer = window.setInterval(refresh, 120_000);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const markComplete = async (id: string) => {
+    setCompleting(id);
+
+    try {
+      await markAssignmentComplete(id);
+      setAssignments((prev) =>
+        prev.map((assignment) =>
+          assignment.id === id
+            ? { ...assignment, status: 'submitted', progress: 100 }
+            : assignment
+        )
+      );
+    } catch (error) {
+      window.alert(
+        error instanceof Error ? error.message : 'Could not mark assignment done.'
+      );
+    } finally {
+      setCompleting(null);
+    }
+  };
 
   const toggleSubtask = (assignmentId: string, subtaskId: string) => {
     setAssignments((prev) =>
@@ -52,11 +96,10 @@ export default function Assignments({ data }: Props) {
           <button
             key={f}
             onClick={() => setFilter(f)}
-            className={`rounded-lg px-4 py-2 text-sm font-medium capitalize transition-all ${
-              filter === f
-                ? 'bg-ink-900 text-white'
-                : 'bg-white text-ink-600 ring-1 ring-ink-200 hover:bg-ink-50'
-            }`}
+            className={`rounded-lg px-4 py-2 text-sm font-medium capitalize transition-all ${filter === f
+              ? 'bg-ink-900 text-white'
+              : 'bg-white text-ink-600 ring-1 ring-ink-200 hover:bg-ink-50'
+              }`}
           >
             {f} ({f === 'all' ? assignments.length : f === 'active' ? assignments.filter(a => a.status !== 'submitted' && a.status !== 'graded').length : assignments.filter(a => a.status === 'submitted' || a.status === 'graded').length})
           </button>
@@ -96,9 +139,8 @@ export default function Assignments({ data }: Props) {
                 <div className="w-24">
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-ink-100">
                     <div
-                      className={`h-full rounded-full transition-all ${
-                        a.progress >= 80 ? 'bg-mint-500' : a.progress >= 40 ? 'bg-brand-500' : 'bg-amber-500'
-                      }`}
+                      className={`h-full rounded-full transition-all ${a.progress >= 80 ? 'bg-mint-500' : a.progress >= 40 ? 'bg-brand-500' : 'bg-amber-500'
+                        }`}
                       style={{ width: `${a.progress}%` }}
                     />
                   </div>
@@ -167,6 +209,8 @@ export default function Assignments({ data }: Props) {
                       </div>
                     )}
 
+
+
                     {/* Deadline info */}
                     <div className="rounded-xl bg-ink-50 p-3">
                       <div className="flex items-center gap-2">
@@ -180,11 +224,22 @@ export default function Assignments({ data }: Props) {
                         {Math.ceil((new Date(a.dueDate).getTime() - Date.now()) / 86400000)} days remaining
                       </p>
                     </div>
+                    {a.status !== 'submitted' && a.status !== 'graded' && (
+                      <button
+                        type="button"
+                        onClick={() => void markComplete(a.id)}
+                        disabled={completing === a.id}
+                        className="w-full rounded-xl bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
+                      >
+                        {completing === a.id ? 'Saving…' : 'Mark done'}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
             )}
           </div>
+
         ))}
         {sorted.length === 0 && (
           <div className="card p-8 text-center">
