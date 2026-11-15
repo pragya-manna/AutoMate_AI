@@ -127,7 +127,7 @@ export default function Landing({ onLaunch }: LandingProps) {
           <div className="mx-auto max-w-3xl text-center">
             <div className="mb-6 inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-medium text-ink-600 shadow-sm ring-1 ring-ink-200 animate-fade-in">
               <Sparkles className="h-4 w-4 text-brand-500" />
-              Powered by Google Gemini 2.0
+              Powered by Google Gemini 3.8
             </div>
 
             <h1 className="font-display text-4xl font-bold leading-[1.1] tracking-tight text-ink-900 sm:text-6xl animate-fade-up">

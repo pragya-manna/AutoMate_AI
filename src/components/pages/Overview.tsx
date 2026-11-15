@@ -43,7 +43,7 @@ export default function Overview({ data, setPage }: Props) {
               <Sparkles className="h-3.5 w-3.5" />
               AI Analysis Complete
             </div>
-            <h2 className="font-display text-2xl font-bold text-white">Welcome back, Student</h2>
+            <h2 className="font-display text-2xl font-bold text-white">Welcome back, Pragya</h2>
             <p className="mt-1 max-w-lg text-sm text-ink-400">
               You have {data.stats.pendingAssignments} pending assignments and {data.stats.upcomingDeadlines} deadlines this week.
               {data.risks.length > 0 && ` I've detected ${data.risks.length} risk${data.risks.length > 1 ? 's' : ''} that need your attention.`}
